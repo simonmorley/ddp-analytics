@@ -1,0 +1,147 @@
+name: Deploy to DigitalOcean Kubernetes with Migrations
+
+on:
+  push:
+    branches:
+      - main  # Adjust to your deployment branch
+
+env:
+  DOCKER_IMAGE: registry.digitalocean.com/ddp/ddp-analytics
+
+  REGISTRY_ID: ddp
+  REPOSITORY_NAME: ddp-analytics
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # Set up Docker Buildx for cross-platform builds
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    # Log in to DigitalOcean Container Registry
+    - name: Log in to DigitalOcean Container Registry
+      run: echo "${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}" | docker login registry.digitalocean.com -u do --password-stdin
+
+    # Generate a unique key (timestamp) for the image tag
+    - name: Generate Unique Key
+      id: generate-key
+      run: echo "::set-output name=key::$(date +%s)"
+
+    - name: Set Deployment Target
+      id: set-deployment
+      run: |
+        if [[ "${{ github.ref_name }}" == "main" ]]; then
+          echo "::set-output name=image::${{ env.DOCKER_IMAGE_MAIN }}"
+          echo "::set-output name=deployment::ddp-analytics-deployment"
+        elif [[ "${{ github.ref_name }}" == "beta" ]]; then
+          echo "::set-output name=image::${{ env.DOCKER_IMAGE_BETA }}"
+          echo "::set-output name=deployment::ddp-analytics-beta-deployment"
+        else
+          echo "This branch is not eligible for deployment."
+          exit 1
+        fi
+
+    # Build and push the new Docker image for the front end
+    - name: Build and Push Docker Image (Front End)
+      run: |
+        if [[ "${{ github.ref_name }}" == "main" ]]; then
+          echo "Building front-end image for main with tag ${{ steps.generate-key.outputs.key }}"
+          docker build -t $DOCKER_IMAGE:${{ steps.generate-key.outputs.key }} .
+          docker push $DOCKER_IMAGE:${{ steps.generate-key.outputs.key }}
+        elif [[ "${{ github.ref_name }}" == "beta" ]]; then
+          echo "Building front-end image for beta with tag ${{ steps.generate-key.outputs.key }}"
+          docker build -t $DOCKER_IMAGE_BETA:${{ steps.generate-key.outputs.key }} .
+          docker push $DOCKER_IMAGE_BETA:${{ steps.generate-key.outputs.key }}
+        else
+          echo "This branch is not eligible for Docker build and push."
+          exit 1
+        fi
+      env:
+        DOCKER_DEFAULT_PLATFORM: linux/amd64
+
+    # # Set up kubectl by downloading it and setting up the kubeconfig
+    # - name: Install kubectl
+    #   run: |
+    #     curl -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+    #     chmod +x ./kubectl
+    #     sudo mv ./kubectl /usr/local/bin/kubectl
+
+    # # Configure kubectl using the KUBECONFIG secret
+    # - name: Set up Kubeconfig
+    #   run: |
+    #     mkdir -p $HOME/.kube
+    #     echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
+
+    # # Update the Kubernetes deployments for both the front-end and sidekiq
+    # - name: Update Kubernetes Deployments
+    #   run: |
+    #     if [[ "${{ github.ref_name }}" == "main" ]]; then
+    #       kubectl set image deployment/ddp-analytics-deployment ddp-analytics=$DOCKER_IMAGE:${{ steps.generate-key.outputs.key }} -n default
+    #       kubectl set image deployment/ddp-sidekiq-deployment ddp-sidekiq=$DOCKER_IMAGE:${{ steps.generate-key.outputs.key }} -n default
+    #     elif [[ "${{ github.ref_name }}" == "beta" ]]; then
+    #       kubectl set image deployment/ddp-analytics-beta-deployment ddp-analytics-beta=$DOCKER_IMAGE_BETA:${{ steps.generate-key.outputs.key }} -n default
+    #     else
+    #       echo "This branch is not eligible for deployment."
+    #       exit 1
+    #     fi
+
+    # Delete old Docker images older than 7 days
+    - name: Delete Old Docker Images
+      run: |
+        echo "Deleting Docker images older than 7 days..."
+        TOKEN="${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}"
+        BASE_URL="https://api.digitalocean.com/v2/registry/ddp/repositories/ddp-analytics/tags"
+
+        # Get the current date for comparison
+        DATE_THRESHOLD=$(date -u -d '-7 days' +'%Y-%m-%dT%H:%M:%SZ')
+        echo "Date for comparison: $DATE_THRESHOLD"  # Print the comparison date
+
+        # Initialize variables
+        PAGE=1
+
+        # Loop through all pages
+        while true; do
+          echo "Fetching page $PAGE..."
+          RESPONSE=$(curl -s -X GET "$BASE_URL?page=$PAGE" -H "Authorization: Bearer $TOKEN")
+
+          # Check if the repository was found
+          # Check if the repository was found
+          if echo "$RESPONSE" | jq -e 'has("message")' > /dev/null; then
+            echo "Error: Repository not found or another error occurred."
+            echo "API Response: $RESPONSE"
+            exit 1  # Exit the script with an error
+          fi
+
+          # Extract images that are older than the date threshold
+          IMAGES=$(echo "$RESPONSE" | jq -r '.tags[] | select(.updated_at < "'"$DATE_THRESHOLD"'") | {name: .tag, updated_at: .updated_at}')
+
+          # Loop through the images and delete them
+          for IMAGE in $(echo "$IMAGES" | jq -c '.'); do
+            NAME=$(echo "$IMAGE" | jq -r '.name')
+            UPDATED_AT=$(echo "$IMAGE" | jq -r '.updated_at')
+            echo "Image: $NAME, Updated At: $UPDATED_AT"
+
+            # Check if the image name is not null before deleting
+            if [ "$NAME" != "null" ]; then
+              echo "Deleting image: $NAME"
+              curl -X DELETE "$BASE_URL/$NAME" -H "Authorization: Bearer $TOKEN"
+            fi
+          done
+
+          # Check if there is a next page
+          NEXT_PAGE=$(echo "$RESPONSE" | jq -r '.links.pages.next')
+
+          if [ "$NEXT_PAGE" == "null" ]; then
+            break  # Exit the loop if there are no more pages
+          fi
+
+          PAGE=$((PAGE + 1))  # Increment page number
+        done
+
+        echo "Deletion process complete."
+
