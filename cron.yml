@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ddp-analytics
+spec:
+  schedule: "0 * * * *"  # Runs every hour
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: ddp-analytics
+            image: registry.digitalocean.com/ddp/ddp-analytics:1734956753  # Replace with your image
+            imagePullPolicy: Always
+            command: ["python", "main.py"]  # Override if needed
+            env:
+            - name: ES_HOST
+              value: http://elasticsearch.default.svc.cluster.local:9200
+            - name: BASE64_ENCODED_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  key: credentials
+                  name: ddp-analytics
+          restartPolicy: Never
+

@@ -41,7 +41,7 @@ def get_last_insert_date(sheet):
 
     return None  # Return None if no valid timestamp is found
 
-def fetch_es_data(last_timestamp=None):
+def fetch_es_data(ttype, last_timestamp=None):
     """Fetch all new data from Elasticsearch with pagination."""
     # Define fields to extract
     fields_to_keep = [
@@ -58,7 +58,7 @@ def fetch_es_data(last_timestamp=None):
                     {
                         "term": {
                             "event_details.event_type": {
-                                "value": "search"
+                                "value": ttype
                             }
                         }
                     }
@@ -180,36 +180,45 @@ SCOPES = [
 ]
 
 def main():
-    # Authenticate with Google Sheets
     credentials = Credentials.from_service_account_info(
         json.loads(credentials_info),
         scopes=SCOPES
     )
     gc = gspread.authorize(credentials)
 
-    print(credentials.service_account_email)
+    ttypes = ['search', 'click.event']
+    for ttype in ttypes:
+        if ttype == 'search':
+            sheet_name = 'Sheet1'
+        else:
+            sheet_name = 'Sheet2'
 
-    # Open the Google Sheet
-    sheet = gc.open_by_key(SHEET_NAME).sheet1
+        spreadsheet = gc.open_by_key(SHEET_NAME)#.sheet2
 
-    # # Get the last insert date from Google Sheets
-    last_timestamp = get_last_insert_date(sheet)
+        all_sheets = spreadsheet.worksheets()
 
-    if last_timestamp is None:
-        last_timestamp = int((pd.Timestamp.now() - pd.DateOffset(months=1)).timestamp())
+        # sheet_name = 'Sheet2'
+        sheet = spreadsheet.worksheet(sheet_name)
+
+        print(ttype, sheet_name)
+
+        last_timestamp = get_last_insert_date(sheet)
+
+        if last_timestamp is None:
+            last_timestamp = int((pd.Timestamp.now() - pd.DateOffset(months=1)).timestamp())
+            
+        print(last_timestamp)
+
+        records = fetch_es_data(ttype, last_timestamp)
+        if not records:
+            print("No new records to export.")
+            continue
         
-    print(last_timestamp)
+        # # Convert records to DataFrame
+        df = pd.DataFrame(records)
 
-    records = fetch_es_data(last_timestamp)
-    if not records:
-        print("No new records to export.")
-        return
-    
-    # # Convert records to DataFrame
-    df = pd.DataFrame(records)
-
-    export_to_google_sheets(df, sheet)
-    print("Data exported successfully.")
+        export_to_google_sheets(df, sheet)
+        print("Data exported successfully.")
 
 if __name__ == "__main__":
     main()
